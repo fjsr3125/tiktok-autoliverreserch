@@ -11,13 +11,14 @@ function stripQuotes(value) {
   return value;
 }
 
-function loadEnvFile(filePath = ".env") {
+function parseEnvFile(filePath) {
   const resolvedPath = path.resolve(filePath);
   if (!fs.existsSync(resolvedPath)) {
-    return;
+    return [];
   }
 
   const content = fs.readFileSync(resolvedPath, "utf8");
+  const entries = [];
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) {
@@ -31,14 +32,35 @@ function loadEnvFile(filePath = ".env") {
 
     const key = trimmed.slice(0, separatorIndex).trim();
     const rawValue = trimmed.slice(separatorIndex + 1).trim();
-    if (!key || process.env[key] !== undefined) {
+    if (!key) {
       continue;
     }
 
-    process.env[key] = stripQuotes(rawValue);
+    entries.push([key, stripQuotes(rawValue)]);
+  }
+
+  return entries;
+}
+
+function loadEnvFiles(filePaths = [".env", ".env.local"]) {
+  const protectedKeys = new Set(Object.keys(process.env));
+
+  for (const filePath of filePaths) {
+    for (const [key, value] of parseEnvFile(filePath)) {
+      if (protectedKeys.has(key)) {
+        continue;
+      }
+      process.env[key] = value;
+    }
   }
 }
 
+function loadEnvFile(filePath = ".env") {
+  loadEnvFiles([filePath]);
+}
+
 module.exports = {
-  loadEnvFile
+  loadEnvFile,
+  loadEnvFiles,
+  parseEnvFile
 };

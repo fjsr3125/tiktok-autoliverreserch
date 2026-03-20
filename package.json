@@ -5,6 +5,9 @@
   "description": "TikTok LIVE collector with Playwright and Google Sheets dedupe",
   "scripts": {
     "collect": "node src/collect-tiktok-live.js",
+    "live:navigation:test": "node src/live-navigation-runner.js",
+    "next-profile:test": "node src/live-next-profile-runner.js",
+    "scroll:test": "node src/scroll-tiktok-live-feed.js",
     "test": "node --test"
   },
   "engines": {
@@ -12,6 +15,7 @@
   },
   "dependencies": {
     "googleapis": "^157.0.0",
+    "patchright": "^1.58.2",
     "playwright": "^1.53.0"
   }
 }

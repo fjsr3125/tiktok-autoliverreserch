@@ -52,6 +52,41 @@ TikTok LIVE から候補ライバーを収集し、既存データとの重複�
 
 このため、`uniqueId` と `followerCount` の取得には `Vision API` は不要と判断する。
 
+### ブラウザ接続方式の検証結果（2026-03-20）
+
+TikTok はbot検出が厳しく、Playwright単体では LIVE フィードが表示されない。以下を検証した。
+
+| 方式 | 結果 | 理由 |
+|------|------|------|
+| Playwright + `storageState` (Cookie復元) | NG | Cookie だけでは不十分。IndexedDB 等のログインデータが必要 |
+| Playwright + `channel: "chrome"` | NG | Chrome が起動直後にクラッシュ（macOS環境） |
+| Patchright + `launchPersistentContext` | NG | Chrome for Testing が `EXC_BREAKPOINT` でクラッシュ |
+| **agent-browser + connectOverCDP** | **OK** | 採用。agent-browser が起動した Chrome に Playwright が CDP 接続 |
+
+#### 採用方式: agent-browser + connectOverCDP
+
+```
+agent-browser (Chrome起動・ログイン状態保持)
+    ↓ CDP (localhost:9222)
+Playwright (connectOverCDP でページ操作・データ取得)
+```
+
+**制約:**
+- CDP 経由で**新しいページを開くと**TikTok に検出される → 既存ページのみ操作可能
+- agent-browser が開いた `/live` ページのサイドバーからLIVE配信者をクリック → 配信ページでスクショ → `goBack()` で戻る、のループで収集
+- サイドバーの「See all」ボタンで表示件数を展開可能（12件→20件）
+- `followerCount` は LIVE フィード上では取得不可（プロフィールページ遷移が必要）
+
+#### 収集フロー（現行）
+
+1. `agent-browser --args "--remote-debugging-port=9222" open https://www.tiktok.com/live`
+2. `Playwright` が CDP 接続し、既存の `/live` ページを取得
+3. サイドバーの「See all」をクリックして展開
+4. 各 `live-side-nav-item` をクリック → LIVE 配信ページに遷移
+5. ページ全体のスクショ + メタデータ（uniqueId, displayName, viewerCount）取得
+6. `goBack()` で `/live` に戻り、次の配信者へ
+7. 結果を `output/latest-run.json` + `output/screenshots/` に出力
+
 ## 5. 共通フロー
 
 どちらのプランでも、最初の入口は統一する。

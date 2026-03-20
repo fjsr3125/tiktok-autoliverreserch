@@ -2,21 +2,20 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { chromium } = require("playwright");
 
-const { loadEnvFile } = require("./load-env");
+const { loadEnvFiles } = require("./load-env");
 const {
   appendCandidates,
   getExistingUniqueIds
 } = require("./google-sheets-repository");
-const {
-  extractMetadataFromHtml,
-  extractUniqueIdFromUrl
-} = require("./tiktok-live-parser");
+const { scrollCollectAndScreenshot } = require("./scroll-tiktok-live-feed");
 
-function parseBoolean(value, defaultValue) {
-  if (value === undefined) {
-    return defaultValue;
-  }
-  return !["false", "0", "no"].includes(String(value).toLowerCase());
+const DEFAULT_CDP_URL = "http://localhost:9222";
+
+async function connectBrowser() {
+  const cdpUrl = process.env.TIKTOK_CDP_URL || DEFAULT_CDP_URL;
+  const browser = await chromium.connectOverCDP(cdpUrl);
+  const context = browser.contexts()[0] || await browser.newContext();
+  return { browser, context };
 }
 
 function getLiveUrls() {
@@ -24,10 +23,6 @@ function getLiveUrls() {
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
-
-  if (urls.length === 0) {
-    throw new Error("Set TIKTOK_LIVE_URLS with at least one TikTok LIVE URL.");
-  }
 
   return [...new Set(urls)];
 }
@@ -40,77 +35,59 @@ async function ensureDir(dirPath) {
   await fs.mkdir(dirPath, { recursive: true });
 }
 
-async function collectLiveCandidate(browser, liveUrl, screenshotDir) {
-  const page = await browser.newPage();
-  try {
-    await page.goto(liveUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000
-    });
-    await page.waitForTimeout(5000);
-
-    const html = await page.content();
-    const metadata = extractMetadataFromHtml(html, liveUrl);
-    const uniqueId = metadata.uniqueId || extractUniqueIdFromUrl(liveUrl);
-    const collectedAt = new Date().toISOString();
-
-    const safeUniqueId = uniqueId || `unknown-${Date.now()}`;
-    const screenshotPath = path.join(screenshotDir, `${safeUniqueId}.png`);
-    await page.screenshot({
-      path: screenshotPath,
-      fullPage: true
-    });
-
-    return {
-      uniqueId,
-      profileUrl: buildProfileUrl(uniqueId),
-      liveUrl,
-      followerCount: metadata.followerCount,
-      title: metadata.title,
-      screenshotPath,
-      collectedAt,
-      duplicateFlag: false,
-      roomId: metadata.roomId,
-      viewerCount: metadata.viewerCount
-    };
-  } finally {
-    await page.close();
-  }
-}
-
 async function writeRunSummary(outputDir, summary) {
   const filePath = path.join(outputDir, "latest-run.json");
   await fs.writeFile(filePath, JSON.stringify(summary, null, 2));
 }
 
 async function main() {
-  loadEnvFile();
+  loadEnvFiles();
 
   const outputDir = path.resolve(process.env.OUTPUT_DIR || "output");
   const screenshotDir = path.join(outputDir, "screenshots");
   await ensureDir(screenshotDir);
 
-  const liveUrls = getLiveUrls();
-  const existingUniqueIds = await getExistingUniqueIds();
-  const browser = await chromium.launch({
-    headless: parseBoolean(process.env.TIKTOK_HEADLESS, true)
-  });
+  const { browser, context } = await connectBrowser();
 
-  const results = [];
+  const page = context.pages().find((p) => p.url().includes("tiktok.com/live"));
+  if (!page) {
+    throw new Error(
+      "agent-browserでTikTok LIVEページを開いてからスクリプトを実行してください。\n" +
+      "例: agent-browser --args \"--remote-debugging-port=9222\" open https://www.tiktok.com/live"
+    );
+  }
+
+  const options = {
+    iterations: Number.parseInt(process.env.TIKTOK_SCROLL_ITERATIONS || "30", 10) || 30,
+    distance: Number.parseInt(process.env.TIKTOK_SCROLL_DISTANCE || "500", 10) || 500,
+    delayMs: Number.parseInt(process.env.TIKTOK_SCROLL_DELAY_MS || "3000", 10) || 3000,
+    idleRounds: Number.parseInt(process.env.TIKTOK_SCROLL_IDLE_ROUNDS || "3", 10) || 3
+  };
+
+  let existingUniqueIds = new Set();
+  const skipSheets = process.env.SKIP_SHEETS === "true";
+  if (!skipSheets) {
+    existingUniqueIds = await getExistingUniqueIds();
+  }
+
+  let results;
   try {
-    for (const liveUrl of liveUrls) {
-      const candidate = await collectLiveCandidate(browser, liveUrl, screenshotDir);
-      candidate.duplicateFlag = Boolean(
-        candidate.uniqueId && existingUniqueIds.has(candidate.uniqueId)
-      );
-      results.push(candidate);
-    }
+    const result = await scrollCollectAndScreenshot(page, options, screenshotDir);
+    results = result.candidates;
   } finally {
     await browser.close();
   }
 
+  for (const candidate of results) {
+    candidate.duplicateFlag = Boolean(
+      candidate.uniqueId && existingUniqueIds.has(candidate.uniqueId)
+    );
+  }
+
   const freshCandidates = results.filter((candidate) => !candidate.duplicateFlag);
-  await appendCandidates(freshCandidates);
+  if (!skipSheets) {
+    await appendCandidates(freshCandidates);
+  }
 
   await writeRunSummary(outputDir, {
     collectedCount: results.length,
@@ -132,7 +109,11 @@ async function main() {
   );
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { buildProfileUrl, getLiveUrls };
