@@ -3,10 +3,12 @@ const assert = require("node:assert/strict");
 
 const {
   dedupeLiveCandidates,
-  normalizeLiveUrl,
+  normalizeLiveUrl
+} = require("../src/scroll-tiktok-live-feed");
+const {
   parseBoolean,
   parseNumber
-} = require("../src/scroll-tiktok-live-feed");
+} = require("../src/live-navigation-runner");
 
 test("normalizeLiveUrl extracts uniqueId from relative live URL", () => {
   assert.deepEqual(normalizeLiveUrl("/@nozo.88y/live?lang=ja-JP", "https://www.tiktok.com/live"), {

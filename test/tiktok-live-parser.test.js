@@ -44,7 +44,8 @@ test("extractMetadataFromHtml reads key values from embedded JSON", () => {
       followerCount: 901,
       roomId: "123456789",
       viewerCount: 87,
-      title: "雑談ライブ"
+      title: "雑談ライブ",
+      coverUrl: null
     }
   );
 });

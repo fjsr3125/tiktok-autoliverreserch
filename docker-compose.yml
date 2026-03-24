@@ -1,0 +1,32 @@
+services:
+  collect:
+    build: .
+    env_file:
+      - .env.local
+    environment:
+      - BROWSER_MODE=launch
+      - STORAGE_STATE_PATH=/app/playwright/.auth/tiktok-live-state.json
+      - OUTPUT_DIR=/app/output
+    volumes:
+      - ./output:/app/output
+      - ./playwright/.auth:/app/playwright/.auth
+    command: node src/collect-tiktok-live.js
+
+  n8n:
+    image: n8nio/n8n:latest
+    env_file:
+      - .env.local
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_RESTRICT_ENVIRONMENT_VARIABLES_ACCESS=false
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD:-changeme}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./output:/home/node/.n8n-files/output:ro
+    restart: unless-stopped
+
+volumes:
+  n8n_data:

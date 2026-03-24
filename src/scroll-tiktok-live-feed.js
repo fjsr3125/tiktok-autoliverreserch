@@ -1,24 +1,18 @@
 const fs = require("node:fs/promises");
+const https = require("node:https");
+const http = require("node:http");
 const path = require("node:path");
 const { chromium } = require("playwright");
 
 const { loadEnvFiles } = require("./load-env");
-
-function parseBoolean(value, defaultValue) {
-  if (value === undefined) {
-    return defaultValue;
-  }
-  return !["false", "0", "no"].includes(String(value).toLowerCase());
-}
-
-function parseNumber(value, defaultValue) {
-  if (value === undefined || value === "") {
-    return defaultValue;
-  }
-
-  const parsed = Number.parseInt(String(value), 10);
-  return Number.isNaN(parsed) ? defaultValue : parsed;
-}
+const { extractMetadataFromHtml, extractUniqueIdFromUrl } = require("./tiktok-live-parser");
+const {
+  clickNextProfileButton,
+  getCurrentLiveState,
+  waitForProfileChange,
+  parseBoolean,
+  parseNumber
+} = require("./live-navigation-runner");
 
 function normalizeLiveUrl(rawHref, baseUrl) {
   if (!rawHref) {
@@ -65,6 +59,38 @@ function dedupeLiveCandidates(candidates) {
 
 async function ensureDir(dirPath) {
   await fs.mkdir(dirPath, { recursive: true });
+}
+
+async function downloadImage(url, destPath, timeoutMs = 10000) {
+  const mod = url.startsWith("https") ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = mod.get(url, { timeout: timeoutMs }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        downloadImage(res.headers.location, destPath, timeoutMs).then(resolve, reject);
+        res.resume();
+        return;
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`HTTP ${res.statusCode}`));
+        return;
+      }
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", async () => {
+        const buffer = Buffer.concat(chunks);
+        if (buffer.length < 1000) {
+          reject(new Error("Image too small"));
+          return;
+        }
+        await fs.writeFile(destPath, buffer);
+        resolve(buffer.length);
+      });
+      res.on("error", reject);
+    });
+    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+    req.on("error", reject);
+  });
 }
 
 async function waitForLiveFeed(page, delayMs) {
@@ -220,60 +246,110 @@ async function collectDebugSnapshot(page) {
   });
 }
 
-async function screenshotLiveCards(page, screenshotDir, seenUrls) {
-  const sidebarItems = await page.locator('[data-e2e="live-side-nav-item"]').all();
+async function collectLiveCardsFromPage(page) {
+  return page.evaluate(() => {
+    const seen = new Set();
+    const cards = [];
+    const anchors = Array.from(document.querySelectorAll("a[href]"));
+
+    for (const anchor of anchors) {
+      const href = anchor.getAttribute("href") || "";
+      const match = href.match(/^\/@([^/]+)\/live\/?$/);
+      if (!match) continue;
+
+      const uniqueId = match[1];
+      if (seen.has(uniqueId)) continue;
+
+      // カードコンテナを探す（"watching" テキストを含む最寄りの親）
+      let container = anchor;
+      for (let i = 0; i < 8; i++) {
+        if (!container.parentElement) break;
+        container = container.parentElement;
+        if ((container.textContent || "").includes("watching")) break;
+      }
+
+      const text = (container.textContent || "").replace(/\s+/g, " ").trim();
+      const viewerMatch = text.match(/(\d[\d,]*)\s*watching/i);
+      const viewerCount = viewerMatch
+        ? Number.parseInt(viewerMatch[1].replace(/,/g, ""), 10)
+        : null;
+
+      // タイトル抽出: "LIVE" の後〜ユーザー名 or watching の前
+      const titleMatch = text.match(/LIVE\s*(.+?)(?:\d[\d,]*\s*watching|Click to watch)/i);
+      const displayName = titleMatch ? titleMatch[1].trim() : uniqueId;
+
+      seen.add(uniqueId);
+      cards.push({ uniqueId, href, displayName, viewerCount });
+    }
+
+    return cards;
+  });
+}
+
+async function screenshotLiveCards(page, screenshotDir, seenUrls, onCandidate) {
+  const cards = await collectLiveCardsFromPage(page);
   const results = [];
+  const feedUrl = page.url();
 
-  for (const item of sidebarItems) {
-    const info = await item.evaluate((el) => {
-      const link = el.closest("a[href]") || el.querySelector("a[href]");
-      if (!link) return null;
-      const href = link.getAttribute("href") || "";
-      const match = href.match(/\/@([^/]+)\/live/);
-      if (!match) return null;
-
-      const nameEl = el.querySelector('[data-e2e="live-side-nav-name"]');
-      const countEl = el.querySelector('[data-e2e="person-count"]');
-      return {
-        uniqueId: match[1],
-        href,
-        displayName: nameEl ? nameEl.textContent.trim() : null,
-        viewerCount: countEl ? Number.parseInt(countEl.textContent.trim(), 10) : null
-      };
-    });
-
-    if (!info || seenUrls.has(info.uniqueId)) continue;
+  for (const info of cards) {
+    if (seenUrls.has(info.uniqueId)) continue;
     seenUrls.add(info.uniqueId);
 
-    // サイドバーの項目をクリックしてLIVE配信ページに遷移
+    const liveUrl = `https://www.tiktok.com${info.href}`;
+
+    // LIVE配信ページに遷移してメタデータ抽出
     try {
-      await item.click();
-      await page.waitForTimeout(3000);
+      await page.goto(liveUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+      await page.waitForTimeout(2000);
     } catch {
       continue;
     }
 
-    // LIVE配信ページのスクショを撮る
-    const screenshotPath = path.join(screenshotDir, `${info.uniqueId}.png`);
+    // 埋め込みデータからfollowerCount等を抽出
+    let meta = {};
     try {
-      await page.screenshot({ path: screenshotPath });
+      const html = await page.content();
+      meta = extractMetadataFromHtml(html, liveUrl);
     } catch {
-      // スクショ失敗しても戻る
+      // 抽出失敗しても続行
     }
 
-    // /live フィードに戻る
-    await page.goBack({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
-    await page.waitForTimeout(2000);
+    // サムネイル画像をダウンロード（失敗時はスクショにフォールバック）
+    const screenshotPath = path.join(screenshotDir, `${info.uniqueId}.png`);
+    if (meta.coverUrl) {
+      try {
+        await downloadImage(meta.coverUrl, screenshotPath);
+      } catch {
+        try { await page.screenshot({ path: screenshotPath }); } catch { /* 続行 */ }
+      }
+    } else {
+      try { await page.screenshot({ path: screenshotPath }); } catch { /* 続行 */ }
+    }
 
-    results.push({
+    const candidate = {
       uniqueId: info.uniqueId,
-      liveUrl: `https://www.tiktok.com${info.href}`,
+      liveUrl,
       profileUrl: `https://www.tiktok.com/@${info.uniqueId}`,
       displayName: info.displayName,
-      viewerCount: info.viewerCount,
+      followerCount: meta.followerCount ?? null,
+      viewerCount: meta.viewerCount ?? info.viewerCount,
+      title: meta.title ?? null,
+      roomId: meta.roomId ?? null,
       screenshotPath,
       collectedAt: new Date().toISOString()
-    });
+    };
+    results.push(candidate);
+
+    // 1件ごとに保存コールバック
+    if (onCandidate) {
+      await onCandidate(candidate);
+    }
+  }
+
+  // フィードに戻る
+  if (results.length > 0) {
+    await page.goto(feedUrl, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
+    await page.waitForTimeout(1000);
   }
 
   return results;
@@ -322,27 +398,193 @@ async function scrollAndCollect(page, options) {
   };
 }
 
-async function scrollCollectAndScreenshot(page, options, screenshotDir) {
+async function scrollCollectAndScreenshot(page, options, screenshotDir, onCandidate) {
   const seenIds = new Set();
   const allResults = [];
+  const allRounds = [];
 
-  // 「See all」ボタンがあれば押してサイドバーを展開
-  const moreBtn = page.locator('[data-e2e="live-side-more-button"]');
-  if (await moreBtn.count() > 0) {
-    await moreBtn.click();
-    await page.waitForTimeout(2000);
-    console.log("サイドバー展開済み");
-  }
+  // Phase 1: スクロールしながらLIVEカードのリンクを収集
+  const scrollResult = await scrollAndCollect(page, options);
+  allRounds.push(...scrollResult.rounds);
+  console.log(`スクロール発見: ${scrollResult.candidates.length}件`);
 
-  const results = await screenshotLiveCards(page, screenshotDir, seenIds);
+  // Phase 2: 発見したカード + 現在表示中のカードからスクショ収集
+  const results = await screenshotLiveCards(page, screenshotDir, seenIds, onCandidate);
   allResults.push(...results);
 
-  console.log(`収集完了: ${results.length}件`);
+  // スクロールで見つけたがスクショ未取得の候補も処理
+  for (const candidate of scrollResult.candidates) {
+    const match = candidate.liveUrl.match(/\/@([^/]+)\/live/);
+    if (!match || seenIds.has(match[1])) continue;
+    seenIds.add(match[1]);
+
+    try {
+      await page.goto(candidate.liveUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+      await page.waitForTimeout(2000);
+    } catch {
+      continue;
+    }
+
+    let meta = {};
+    try {
+      const html = await page.content();
+      meta = extractMetadataFromHtml(html, candidate.liveUrl);
+    } catch {
+      // 抽出失敗しても続行
+    }
+
+    const screenshotPath = path.join(screenshotDir, `${match[1]}.png`);
+    if (meta.coverUrl) {
+      try {
+        await downloadImage(meta.coverUrl, screenshotPath);
+      } catch {
+        try { await page.screenshot({ path: screenshotPath }); } catch { /* 続行 */ }
+      }
+    } else {
+      try { await page.screenshot({ path: screenshotPath }); } catch { /* 続行 */ }
+    }
+
+    const result = {
+      uniqueId: match[1],
+      liveUrl: candidate.liveUrl,
+      profileUrl: `https://www.tiktok.com/@${match[1]}`,
+      displayName: candidate.label || match[1],
+      followerCount: meta.followerCount ?? null,
+      viewerCount: meta.viewerCount ?? null,
+      title: meta.title ?? null,
+      roomId: meta.roomId ?? null,
+      screenshotPath,
+      collectedAt: new Date().toISOString()
+    };
+    allResults.push(result);
+
+    if (onCandidate) {
+      await onCandidate(result);
+    }
+  }
+
+  console.log(`収集完了: ${allResults.length}件`);
 
   return {
-    rounds: [{ round: 1, newThisRound: results.length, totalFound: seenIds.size }],
+    rounds: allRounds,
     candidates: allResults
   };
+}
+
+async function openFirstLiveCard(page) {
+  const firstCard = page.locator('a[href*="/@"][href*="/live"]').first();
+  await firstCard.waitFor({ state: "visible", timeout: 15000 });
+  await firstCard.click();
+  await page.waitForTimeout(5000);
+}
+
+async function navigateAndCollect(page, options, screenshotDir, onCandidate) {
+  const maxCollect = options.maxCollect || 100;
+  const navFailLimit = options.navFailLimit || 3;
+  const seen = new Set();
+  const discoveredUrls = [];
+  let consecutiveFails = 0;
+
+  // Phase 1: ↓ボタンでLIVE URLを高速収集
+  await waitForLiveFeed(page, 3000);
+  await openFirstLiveCard(page);
+  await page.waitForTimeout(3000);
+  console.log("最初のLIVEに入りました");
+  console.log("Phase 1: ↓ボタンでURL収集中...");
+
+  let duplicateStreak = 0;
+  const maxDuplicateStreak = 10;
+
+  for (let i = 0; i < maxCollect * 3; i++) {
+    const currentUrl = page.url();
+    const uniqueId = extractUniqueIdFromUrl(currentUrl);
+    if (uniqueId && !seen.has(uniqueId)) {
+      seen.add(uniqueId);
+      discoveredUrls.push({ uniqueId, liveUrl: `https://www.tiktok.com/@${uniqueId}/live` });
+      consecutiveFails = 0;
+      duplicateStreak = 0;
+    } else if (uniqueId) {
+      duplicateStreak++;
+    } else {
+      consecutiveFails++;
+    }
+
+    if (discoveredUrls.length >= maxCollect) break;
+    if (consecutiveFails >= navFailLimit) {
+      console.log(`↓ボタン失敗が${navFailLimit}回連続 → 終了`);
+      break;
+    }
+    if (duplicateStreak >= maxDuplicateStreak) {
+      console.log(`重複が${maxDuplicateStreak}回連続 → 終了`);
+      break;
+    }
+
+    // ↓ボタンで次へ
+    try {
+      const state = await getCurrentLiveState(page);
+      await clickNextProfileButton(page);
+      await waitForProfileChange(page, state);
+    } catch (err) {
+      consecutiveFails++;
+      console.log(`↓ボタン失敗(${consecutiveFails}): ${err.message}`);
+      if (consecutiveFails >= navFailLimit) break;
+    }
+  }
+
+  console.log(`Phase 1完了: ${discoveredUrls.length}件のURL発見`);
+
+  // Phase 2: 各URLにgotoしてメタデータ+サムネイル取得
+  console.log("Phase 2: メタデータ+サムネイル収集中...");
+  const allResults = [];
+
+  for (const { uniqueId, liveUrl } of discoveredUrls) {
+    // ページに直接遷移（SSR JSONが含まれる）
+    try {
+      await page.goto(liveUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+      await page.waitForTimeout(2000);
+    } catch {
+      continue;
+    }
+
+    let meta = {};
+    try {
+      const html = await page.content();
+      meta = extractMetadataFromHtml(html, liveUrl);
+    } catch { /* 続行 */ }
+
+    // サムネイル画像をダウンロード（失敗時はスクショにフォールバック）
+    const imagePath = path.join(screenshotDir, `${uniqueId}.png`);
+    if (meta.coverUrl) {
+      try {
+        await downloadImage(meta.coverUrl, imagePath);
+      } catch {
+        try { await page.screenshot({ path: imagePath }); } catch { /* 続行 */ }
+      }
+    } else {
+      try { await page.screenshot({ path: imagePath }); } catch { /* 続行 */ }
+    }
+
+    const candidate = {
+      uniqueId,
+      liveUrl,
+      profileUrl: `https://www.tiktok.com/@${uniqueId}`,
+      displayName: meta.uniqueId || uniqueId,
+      followerCount: meta.followerCount ?? null,
+      viewerCount: meta.viewerCount ?? null,
+      title: meta.title ?? null,
+      roomId: meta.roomId ?? null,
+      screenshotPath: imagePath,
+      collectedAt: new Date().toISOString()
+    };
+    allResults.push(candidate);
+
+    if (onCandidate) {
+      await onCandidate(candidate);
+    }
+  }
+
+  console.log(`収集完了: ${allResults.length}件`);
+  return { candidates: allResults };
 }
 
 async function main() {
@@ -438,15 +680,12 @@ if (require.main === module) {
 
 module.exports = {
   collectVisibleLiveCandidates,
+  collectLiveCardsFromPage,
   pickBestScrollContainer,
   dedupeLiveCandidates,
-  markScrollContainer,
   normalizeLiveUrl,
-  parseBoolean,
-  parseNumber,
-  collectDebugSnapshot,
-  scrollTarget,
   scrollAndCollect,
   scrollCollectAndScreenshot,
-  screenshotLiveCards
+  screenshotLiveCards,
+  navigateAndCollect
 };

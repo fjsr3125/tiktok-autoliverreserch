@@ -1,7 +1,3 @@
-function decodeJsonString(value) {
-  return value.replace(/\\"/g, '"').replace(/\\\\/g, "\\");
-}
-
 function firstMatch(text, patterns) {
   for (const pattern of patterns) {
     const match = text.match(pattern);
@@ -76,19 +72,25 @@ function extractMetadataFromHtml(html, liveUrl) {
     ])
   );
 
+  const coverUrl = firstMatch(html, [
+    /"coverUrl"\s*:\s*"(https?:[^"]+)"/,
+    /"cover"\s*:\s*\{[^}]*"url_list"\s*:\s*\["(https?:[^"]+)"/,
+    /<meta\s+property="og:image"\s+content="(https?:[^"]+)"/i,
+    /<meta\s+content="(https?:[^"]+)"\s+property="og:image"/i,
+    /"avatar_thumb"\s*:\s*\{[^}]*"url_list"\s*:\s*\["(https?:[^"]+)"/
+  ]);
+
   return {
     uniqueId,
     followerCount,
     roomId,
     viewerCount,
-    title
+    title,
+    coverUrl
   };
 }
 
 module.exports = {
-  decodeJsonString,
   extractMetadataFromHtml,
-  extractUniqueIdFromUrl,
-  normalizeTitle,
-  toNumber
+  extractUniqueIdFromUrl
 };

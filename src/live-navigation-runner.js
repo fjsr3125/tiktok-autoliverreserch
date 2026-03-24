@@ -324,5 +324,6 @@ module.exports = {
   inspectLiveTop,
   parseBoolean,
   parseNumber,
-  pickLowestButton
+  pickLowestButton,
+  waitForProfileChange
 };
