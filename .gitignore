@@ -7,3 +7,5 @@ output/
 *.log
 *.swp
 .mcp.json
+.obsidian/
+plans/
