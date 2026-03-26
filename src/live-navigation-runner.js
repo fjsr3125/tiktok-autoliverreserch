@@ -116,75 +116,87 @@ function pickLowestButton(candidates) {
 }
 
 async function clickNextProfileButton(page) {
-  const result = await page.evaluate(() => {
-    const elements = Array.from(document.querySelectorAll("*"));
+  const player = page.locator('[data-e2e="live-room-content"]').first();
+  await player.waitFor({ state: "visible", timeout: 10000 });
 
-    const candidates = elements
-      .map((element) => {
-        const className =
-          typeof element.className === "string" ? element.className : "";
-        const rect = element.getBoundingClientRect();
-
-        return {
-          element,
-          className,
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height
-        };
-      })
-      .filter((item) => {
-        const className = item.className;
-        const looksLikeOverlayButton =
-          className.includes("rounded-full") &&
-          className.includes("cursor-pointer") &&
-          className.includes("bg-UIImageOverlayBlackA25");
-        const reasonableSize =
-          item.width >= 30 && item.width <= 60 && item.height >= 30 && item.height <= 60;
-        const inPlayerSide =
-          item.x >= window.innerWidth * 0.6 &&
-          item.x <= window.innerWidth * 0.9 &&
-          item.y >= window.innerHeight * 0.2 &&
-          item.y <= window.innerHeight * 0.8;
-
-        return looksLikeOverlayButton && reasonableSize && inPlayerSide;
-      })
-      .sort((left, right) => right.y - left.y);
-
-    if (candidates.length === 0) {
-      return null;
-    }
-
-    const target = candidates[0];
-    target.element.click();
-
-    return {
-      className: target.className,
-      x: Math.round(target.x),
-      y: Math.round(target.y),
-      width: Math.round(target.width),
-      height: Math.round(target.height)
-    };
-  });
-
-  if (!result) {
-    throw new Error("次プロフィール用の下ボタンを DOM 構造から見つけられませんでした。");
+  const box = await player.boundingBox();
+  if (!box) {
+    throw new Error("LIVEプレイヤー領域を取得できませんでした。");
   }
 
-  return result;
+  // hoverしてオーバーレイを出す
+  await page.mouse.move(
+    Math.round(box.x + box.width * 0.82),
+    Math.round(box.y + box.height * 0.55)
+  );
+  await page.waitForTimeout(300);
+
+  const target = await page.evaluate(() => {
+    const room = document.querySelector('[data-e2e="live-room-content"]');
+    if (!room) return null;
+
+    const roomRect = room.getBoundingClientRect();
+    const excludedSelector = [
+      '[data-e2e="control-bar-id-v2"]',
+      '[data-e2e="live-chat-container"]',
+      '[data-e2e="live-second-screen-container"]'
+    ].join(",");
+
+    const candidates = Array.from(document.querySelectorAll("div, button"))
+      .filter((element) => {
+        const cn = typeof element.className === "string" ? element.className : "";
+        if (!cn.includes("rounded-full") || !cn.includes("bg-UIImageOverlayBlackA25")) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width >= 28 && rect.width <= 64 && rect.height >= 28 && rect.height <= 64;
+      })
+      .filter((element) => {
+        // SVG path で下向き矢印を識別 (path d="m24 28.75...")
+        const svg = element.querySelector("svg");
+        if (!svg) return false;
+        const pathD = svg.querySelector("path")?.getAttribute("d") || "";
+        return pathD.includes("28.75");
+      })
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2
+        };
+      });
+
+    return candidates[0] || null;
+  });
+
+  const clickPoint = target
+    ? { x: Math.round(target.x), y: Math.round(target.y), strategy: "dom-candidate" }
+    : { x: Math.round(box.x + box.width * 0.89), y: Math.round(box.y + box.height * 0.68), strategy: "player-relative-fallback" };
+
+  await page.mouse.click(clickPoint.x, clickPoint.y);
+
+  return clickPoint;
 }
 
 async function waitForProfileChange(page, previousState) {
-  await page
+  const changed = await page
     .waitForFunction(
-      (previousUrl) => location.href !== previousUrl,
-      previousState.url,
-      { timeout: 15000 }
+      (prev) => {
+        if (location.href !== prev.url) return true;
+        const anchor =
+          document.querySelector('[data-e2e="room-header-anchor-name"]');
+        if (anchor) {
+          const name = (anchor.textContent || "").trim();
+          if (name && name !== prev.creatorName) return true;
+        }
+        return false;
+      },
+      previousState,
+      { timeout: 8000 }
     )
-    .catch(() => undefined);
+    .then(() => true)
+    .catch(() => false);
 
-  await page.waitForTimeout(4000);
+  await page.waitForTimeout(1500);
+  return changed;
 }
 
 async function saveScreenshot(page, outputDir, fileName) {

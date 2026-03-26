@@ -61,31 +61,33 @@ TikTok はbot検出が厳しく、Playwright単体では LIVE フィードが表
 | Playwright + `storageState` (Cookie復元) | NG | Cookie だけでは不十分。IndexedDB 等のログインデータが必要 |
 | Playwright + `channel: "chrome"` | NG | Chrome が起動直後にクラッシュ（macOS環境） |
 | Patchright + `launchPersistentContext` | NG | Chrome for Testing が `EXC_BREAKPOINT` でクラッシュ |
-| **agent-browser + connectOverCDP** | **OK** | 採用。agent-browser が起動した Chrome に Playwright が CDP 接続 |
+| **常駐 Chrome + connectOverCDP** | **OK** | 採用。Docker 上の Chrome に Playwright が CDP 接続 |
 
-#### 採用方式: agent-browser + connectOverCDP
+#### 採用方式: 常駐 Chrome + connectOverCDP
 
 ```
-agent-browser (Chrome起動・ログイン状態保持)
-    ↓ CDP (localhost:9222)
+browser service (Chrome起動・ログイン状態保持)
+    ↓ CDP (http://browser:9222)
 Playwright (connectOverCDP でページ操作・データ取得)
 ```
 
 **制約:**
 - CDP 経由で**新しいページを開くと**TikTok に検出される → 既存ページのみ操作可能
-- agent-browser が開いた `/live` ページのサイドバーからLIVE配信者をクリック → 配信ページでスクショ → `goBack()` で戻る、のループで収集
+- browser service が開いた `/live` ページのサイドバーからLIVE配信者をクリック → 配信ページでスクショ → `goBack()` で戻る、のループで収集
 - サイドバーの「See all」ボタンで表示件数を展開可能（12件→20件）
 - `followerCount` は LIVE フィード上では取得不可（プロフィールページ遷移が必要）
+- 初回だけ noVNC で Chrome に入り、TikTok ログイン状態を `chrome_profile` volume に保存する
 
 #### 収集フロー（現行）
 
-1. `agent-browser --args "--remote-debugging-port=9222" open https://www.tiktok.com/live`
-2. `Playwright` が CDP 接続し、既存の `/live` ページを取得
-3. サイドバーの「See all」をクリックして展開
-4. 各 `live-side-nav-item` をクリック → LIVE 配信ページに遷移
-5. ページ全体のスクショ + メタデータ（uniqueId, displayName, viewerCount）取得
-6. `goBack()` で `/live` に戻り、次の配信者へ
-7. 結果を `output/latest-run.json` + `output/screenshots/` に出力
+1. `docker compose up -d browser`
+2. noVNC で `http://localhost:6080` を開き、Chrome で TikTok に 1 回ログインする
+3. `Playwright` が `http://browser:9222` に CDP 接続し、既存の `/live` ページを取得
+4. サイドバーの「See all」をクリックして展開
+5. 各 `live-side-nav-item` をクリック → LIVE 配信ページに遷移
+6. ページ全体のスクショ + メタデータ（uniqueId, displayName, viewerCount）取得
+7. `goBack()` で `/live` に戻り、次の配信者へ
+8. 結果を `output/latest-run.json` + `output/screenshots/` に出力
 
 ## 5. 共通フロー
 

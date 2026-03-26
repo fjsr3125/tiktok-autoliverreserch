@@ -37,17 +37,42 @@ test("extractMetadataFromHtml reads key values from embedded JSON", () => {
     </html>
   `;
 
-  assert.deepEqual(
-    extractMetadataFromHtml(html, "https://www.tiktok.com/@nozo.88y/live"),
-    {
-      uniqueId: "nozo.88y",
-      followerCount: 901,
-      roomId: "123456789",
-      viewerCount: 87,
-      title: "雑談ライブ",
-      coverUrl: null
-    }
-  );
+  const meta = extractMetadataFromHtml(html, "https://www.tiktok.com/@nozo.88y/live");
+  assert.equal(meta.uniqueId, "nozo.88y");
+  assert.equal(meta.followerCount, 901);
+  assert.equal(meta.roomId, "123456789");
+  assert.equal(meta.viewerCount, 87);
+  assert.equal(meta.title, "雑談ライブ");
+});
+
+test("extractMetadataFromHtml extracts nickname from SIGI_STATE", () => {
+  const html = `
+    <html>
+      <body>
+        <script id="SIGI_STATE" type="application/json">
+          {
+            "LiveRoom": {
+              "roomId": "999",
+              "title": "トーク配信",
+              "owner": {
+                "uniqueId": "test_user",
+                "nickname": "テストユーザー",
+                "followerCount": 5000
+              },
+              "stats": {
+                "viewerCount": 150
+              }
+            }
+          }
+        </script>
+      </body>
+    </html>
+  `;
+
+  const meta = extractMetadataFromHtml(html, "https://www.tiktok.com/@test_user/live");
+  assert.equal(meta.nickname, "テストユーザー");
+  assert.equal(meta.uniqueId, "test_user");
+  assert.equal(meta.followerCount, 5000);
 });
 
 test("extractMetadataFromHtml falls back to URL when uniqueId is missing", () => {
@@ -67,4 +92,5 @@ test("extractMetadataFromHtml falls back to URL when uniqueId is missing", () =>
   assert.equal(metadata.uniqueId, "fallback.user");
   assert.equal(metadata.followerCount, 1200);
   assert.equal(metadata.title, "ライブ中");
+  assert.equal(metadata.nickname, null);
 });

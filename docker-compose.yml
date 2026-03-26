@@ -1,13 +1,37 @@
 services:
+  browser:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.browser
+    volumes:
+      - chrome_profile:/data/chrome-profile
+    ports:
+      - "6080:6080"
+      - "9222:9223"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9223/json/version || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
   collect:
+    platform: linux/amd64
     build: .
+    network_mode: "service:browser"
     env_file:
       - .env.local
+    depends_on:
+      browser:
+        condition: service_healthy
     environment:
-      - BROWSER_MODE=launch
-      - STORAGE_STATE_PATH=/app/playwright/.auth/tiktok-live-state.json
+      - BROWSER_MODE=cdp
+      - TIKTOK_CDP_URL=http://localhost:9222
       - OUTPUT_DIR=/app/output
     volumes:
+      - ./src:/app/src:ro
       - ./output:/app/output
       - ./playwright/.auth:/app/playwright/.auth
     command: node src/collect-tiktok-live.js
@@ -29,4 +53,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  chrome_profile:
   n8n_data:

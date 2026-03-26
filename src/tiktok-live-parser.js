@@ -37,12 +37,61 @@ function extractUniqueIdFromUrl(liveUrl) {
   return match ? match[1] : null;
 }
 
+function tryExtractSigiState(html) {
+  const match = html.match(/<script\s+id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/i);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+function extractFromStructuredData(data) {
+  const liveRoom = data.LiveRoom || (data.__DEFAULT_SCOPE__ && data.__DEFAULT_SCOPE__.LiveRoom) || {};
+  const owner = liveRoom.owner || (liveRoom.liveRoomUserInfo && liveRoom.liveRoomUserInfo.user) || {};
+  const stats = liveRoom.stats || liveRoom.liveRoomStats || {};
+
+  return {
+    uniqueId: owner.uniqueId || null,
+    nickname: owner.nickname || null,
+    followerCount: typeof owner.followerCount === "number" ? owner.followerCount : null,
+    roomId: liveRoom.roomId || null,
+    viewerCount: typeof stats.viewerCount === "number" ? stats.viewerCount :
+                 typeof stats.userCount === "number" ? stats.userCount : null,
+    title: liveRoom.title || null,
+    coverUrl: liveRoom.coverUrl || null
+  };
+}
+
 function extractMetadataFromHtml(html, liveUrl) {
+  // SIGI_STATE から構造化データを優先抽出
+  const sigiState = tryExtractSigiState(html);
+  if (sigiState) {
+    const s = extractFromStructuredData(sigiState);
+    if (s.uniqueId || s.followerCount !== null) {
+      return {
+        uniqueId: s.uniqueId || extractUniqueIdFromUrl(liveUrl),
+        nickname: s.nickname,
+        followerCount: s.followerCount,
+        roomId: s.roomId,
+        viewerCount: s.viewerCount,
+        title: s.title,
+        coverUrl: s.coverUrl
+      };
+    }
+  }
+
+  // フォールバック: 正規表現抽出
   const uniqueId =
     firstMatch(html, [
       /"uniqueId"\s*:\s*"([^"]+)"/,
       /"ownerUniqueId"\s*:\s*"([^"]+)"/
     ]) || extractUniqueIdFromUrl(liveUrl);
+
+  const nickname = firstMatch(html, [
+    /"nickname"\s*:\s*"([^"]+)"/
+  ]);
 
   const followerCount = toNumber(
     firstMatch(html, [
@@ -76,12 +125,12 @@ function extractMetadataFromHtml(html, liveUrl) {
     /"coverUrl"\s*:\s*"(https?:[^"]+)"/,
     /"cover"\s*:\s*\{[^}]*"url_list"\s*:\s*\["(https?:[^"]+)"/,
     /<meta\s+property="og:image"\s+content="(https?:[^"]+)"/i,
-    /<meta\s+content="(https?:[^"]+)"\s+property="og:image"/i,
-    /"avatar_thumb"\s*:\s*\{[^}]*"url_list"\s*:\s*\["(https?:[^"]+)"/
+    /<meta\s+content="(https?:[^"]+)"\s+property="og:image"/i
   ]);
 
   return {
     uniqueId,
+    nickname,
     followerCount,
     roomId,
     viewerCount,

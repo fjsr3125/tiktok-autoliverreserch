@@ -1,6 +1,6 @@
 # ADR: TikTok LIVE の画面遷移検証は agent-browser の成功ルートを基準にする
 
-- Status: Accepted
+- Status: Superseded
 - Date: 2026-03-18T14:53:27+09:00
 - Supersedes: なし
 

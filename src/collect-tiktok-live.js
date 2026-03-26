@@ -75,13 +75,21 @@ async function main() {
     });
     await page.waitForTimeout(3000);
   } else {
-    page = context.pages().find((p) => p.url().includes("tiktok.com/live"));
+    page = context.pages().find((p) => /tiktok\.com\/(live|@[^/]+\/live)/.test(p.url()));
     if (!page) {
       throw new Error(
         "TikTok LIVEページを開いてからスクリプトを実行してください。\n" +
         "CDPモード: ブラウザで https://www.tiktok.com/live を開いておく\n" +
         "Launchモード: BROWSER_MODE=launch で自動起動"
       );
+    }
+    // 個別LIVEページにいる場合はフィードに戻す
+    if (!page.url().match(/tiktok\.com\/live\/?(\?|#|$)/)) {
+      await page.goto("https://www.tiktok.com/live", {
+        waitUntil: "domcontentloaded",
+        timeout: 30000
+      });
+      await page.waitForTimeout(3000);
     }
   }
 
