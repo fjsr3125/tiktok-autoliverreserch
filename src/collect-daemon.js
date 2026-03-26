@@ -1,8 +1,12 @@
 const http = require("node:http");
+const fs = require("node:fs/promises");
+const path = require("node:path");
 const { main } = require("./collect-tiktok-live");
 
 const PORT = Number.parseInt(process.env.DAEMON_PORT || "3000", 10);
-const INTERVAL_MS = Number.parseInt(process.env.COLLECT_INTERVAL_MS || "1800000", 10); // 30分
+const INTERVAL_MS = Number.parseInt(process.env.COLLECT_INTERVAL_MS || "1800000", 10);
+const OUTPUT_DIR = path.resolve(process.env.OUTPUT_DIR || "output");
+const UNPROCESSED_PATH = path.join(OUTPUT_DIR, "unprocessed.json");
 
 let isRunning = false;
 let stopRequested = false;
@@ -11,6 +15,44 @@ const daemonStartedAt = new Date().toISOString();
 let lastRun = null;
 const history = [];
 const MAX_HISTORY = 20;
+
+async function readUnprocessed() {
+  try {
+    const data = await fs.readFile(UNPROCESSED_PATH, "utf8");
+    return JSON.parse(data);
+  } catch {
+    return [];
+  }
+}
+
+async function writeUnprocessed(candidates) {
+  await fs.writeFile(UNPROCESSED_PATH, JSON.stringify(candidates, null, 2));
+}
+
+async function accumulateResults() {
+  try {
+    const latestPath = path.join(OUTPUT_DIR, "latest-run.json");
+    const data = await fs.readFile(latestPath, "utf8");
+    const run = JSON.parse(data);
+    const newCandidates = (run.results || []).filter(
+      (r) => !r.duplicateFlag && !r.skippedReason
+    );
+
+    if (newCandidates.length === 0) return 0;
+
+    const existing = await readUnprocessed();
+    const existingIds = new Set(existing.map((c) => c.uniqueId));
+    const toAdd = newCandidates.filter((c) => !existingIds.has(c.uniqueId));
+    const merged = [...existing, ...toAdd];
+    await writeUnprocessed(merged);
+
+    console.log(`[daemon] 未処理に${toAdd.length}件追加 (合計${merged.length}件)`);
+    return merged.length;
+  } catch (err) {
+    console.error(`[daemon] 蓄積エラー: ${err.message}`);
+    return 0;
+  }
+}
 
 async function runCollect() {
   if (isRunning) {
@@ -24,9 +66,10 @@ async function runCollect() {
 
   try {
     await main();
+    const unprocessedCount = await accumulateResults();
 
     const finishedAt = new Date().toISOString();
-    lastRun = { startedAt, finishedAt, status: "success", error: null };
+    lastRun = { startedAt, finishedAt, status: "success", error: null, unprocessedCount };
     console.log(`[daemon] 収集完了: ${finishedAt}`);
   } catch (err) {
     const finishedAt = new Date().toISOString();
@@ -41,7 +84,8 @@ async function runCollect() {
   return lastRun;
 }
 
-function getStatus() {
+async function getStatus() {
+  const unprocessed = await readUnprocessed();
   return {
     daemonStartedAt,
     isRunning,
@@ -50,6 +94,7 @@ function getStatus() {
     nextRunAt: intervalId
       ? new Date(Date.now() + INTERVAL_MS).toISOString()
       : null,
+    unprocessedCount: unprocessed.length,
     lastRun,
     historyCount: history.length,
     history: history.slice(0, 5)
@@ -79,7 +124,21 @@ const server = http.createServer(async (req, res) => {
   res.setHeader("Content-Type", "application/json");
 
   if (req.method === "GET" && req.url === "/status") {
-    res.end(JSON.stringify(getStatus(), null, 2));
+    const status = await getStatus();
+    res.end(JSON.stringify(status, null, 2));
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/unprocessed") {
+    const unprocessed = await readUnprocessed();
+    res.end(JSON.stringify({ count: unprocessed.length, candidates: unprocessed }));
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/processed") {
+    await writeUnprocessed([]);
+    console.log("[daemon] 未処理リストをクリア");
+    res.end(JSON.stringify({ message: "未処理リストをクリアしました" }));
     return;
   }
 
@@ -128,11 +187,10 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`[daemon] HTTP API起動 port=${PORT}`);
-  console.log(`[daemon] エンドポイント: GET /status, POST /trigger, POST /trigger-sync, POST /start, POST /stop, GET /history`);
+  console.log("[daemon] エンドポイント: GET /status, GET /unprocessed, POST /processed, POST /trigger, POST /trigger-sync, POST /start, POST /stop, GET /history");
 
   // 初回実行
   runCollect().then(() => {
-    // 初回完了後にループ開始
     if (process.env.AUTO_START_LOOP !== "false") {
       startLoop();
     }
