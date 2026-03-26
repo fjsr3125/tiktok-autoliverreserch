@@ -363,7 +363,14 @@ async function captureLiveCandidate(page, {
   const screenshotPath = path.join(screenshotDir, `${uniqueId}.png`);
 
   try {
-    await page.screenshot({ path: screenshotPath });
+    // LIVE配信エリアだけをトリミングしてスクショ
+    const contentEl = page.locator('[data-e2e="live-content-container"]').first();
+    const box = await contentEl.boundingBox().catch(() => null);
+    if (box) {
+      await page.screenshot({ path: screenshotPath, clip: box });
+    } else {
+      await page.screenshot({ path: screenshotPath });
+    }
   } catch {
     // スクショ失敗でも候補自体は返す
   }
@@ -394,7 +401,10 @@ async function screenshotLiveCards(page, screenshotDir, seenUrls, onCandidate) {
     // LIVE配信ページに遷移してメタデータ抽出
     try {
       await page.goto(liveUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
-      await page.waitForTimeout(2000);
+      await page.locator('[data-e2e="room-header-like-count"]')
+        .waitFor({ state: "visible", timeout: 8000 })
+        .catch(() => {});
+      await page.waitForTimeout(5000);
     } catch {
       continue;
     }
@@ -488,7 +498,10 @@ async function scrollCollectAndScreenshot(page, options, screenshotDir, onCandid
 
     try {
       await page.goto(candidate.liveUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
-      await page.waitForTimeout(2000);
+      await page.locator('[data-e2e="room-header-like-count"]')
+        .waitFor({ state: "visible", timeout: 8000 })
+        .catch(() => {});
+      await page.waitForTimeout(5000);
     } catch {
       continue;
     }

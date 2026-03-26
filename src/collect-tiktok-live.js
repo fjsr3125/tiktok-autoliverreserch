@@ -76,6 +76,10 @@ async function main() {
     await page.waitForTimeout(3000);
   } else {
     page = context.pages().find((p) => /tiktok\.com\/(live|@[^/]+\/live)/.test(p.url()));
+    // Accept-Language を日本語に設定
+    if (page) {
+      await page.setExtraHTTPHeaders({ "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7" });
+    }
     if (!page) {
       throw new Error(
         "TikTok LIVEページを開いてからスクリプトを実行してください。\n" +
