@@ -5,6 +5,10 @@ const { main } = require("./collect-tiktok-live");
 
 const PORT = Number.parseInt(process.env.DAEMON_PORT || "3000", 10);
 const INTERVAL_MS = Number.parseInt(process.env.COLLECT_INTERVAL_MS || "1800000", 10);
+const PROCESSING_LOCK_TTL_MS = Number.parseInt(
+  process.env.PROCESSING_LOCK_TTL_MS || "1800000",
+  10
+);
 const OUTPUT_DIR = path.resolve(process.env.OUTPUT_DIR || "output");
 const UNPROCESSED_PATH = path.join(OUTPUT_DIR, "unprocessed.json");
 
@@ -13,6 +17,7 @@ let stopRequested = false;
 let intervalId = null;
 const daemonStartedAt = new Date().toISOString();
 let lastRun = null;
+let processingStartedAt = null;
 const history = [];
 const MAX_HISTORY = 20;
 
@@ -27,6 +32,72 @@ async function readUnprocessed() {
 
 async function writeUnprocessed(candidates) {
   await fs.writeFile(UNPROCESSED_PATH, JSON.stringify(candidates, null, 2));
+}
+
+async function readJsonBody(req) {
+  const chunks = [];
+
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  if (chunks.length === 0) {
+    return null;
+  }
+
+  const body = Buffer.concat(chunks).toString("utf8").trim();
+  if (!body) {
+    return null;
+  }
+
+  return JSON.parse(body);
+}
+
+function getProcessingState() {
+  if (!processingStartedAt) {
+    return {
+      isProcessing: false,
+      processingStartedAt: null,
+      processingLockExpiresAt: null
+    };
+  }
+
+  const startedAtMs = Date.parse(processingStartedAt);
+  const expiresAtMs = startedAtMs + PROCESSING_LOCK_TTL_MS;
+
+  if (Number.isNaN(startedAtMs) || Date.now() >= expiresAtMs) {
+    if (processingStartedAt) {
+      console.log("[daemon] 処理ロック期限切れのため解除");
+    }
+    processingStartedAt = null;
+    return {
+      isProcessing: false,
+      processingStartedAt: null,
+      processingLockExpiresAt: null
+    };
+  }
+
+  return {
+    isProcessing: true,
+    processingStartedAt,
+    processingLockExpiresAt: new Date(expiresAtMs).toISOString()
+  };
+}
+
+function acquireProcessingLock() {
+  processingStartedAt = new Date().toISOString();
+  const { processingLockExpiresAt } = getProcessingState();
+  console.log(
+    `[daemon] 処理ロックを設定: startedAt=${processingStartedAt} expiresAt=${processingLockExpiresAt}`
+  );
+}
+
+function releaseProcessingLock() {
+  if (!processingStartedAt) {
+    return;
+  }
+  processingStartedAt = null;
+  console.log("[daemon] 処理ロックを解除");
 }
 
 async function accumulateResults() {
@@ -86,9 +157,13 @@ async function runCollect() {
 
 async function getStatus() {
   const unprocessed = await readUnprocessed();
+  const processingState = getProcessingState();
   return {
     daemonStartedAt,
     isRunning,
+    isProcessing: processingState.isProcessing,
+    processingStartedAt: processingState.processingStartedAt,
+    processingLockExpiresAt: processingState.processingLockExpiresAt,
     stopRequested,
     intervalMs: INTERVAL_MS,
     nextRunAt: intervalId
@@ -131,12 +206,55 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && req.url === "/unprocessed") {
     const unprocessed = await readUnprocessed();
+    acquireProcessingLock();
     res.end(JSON.stringify({ count: unprocessed.length, candidates: unprocessed }));
     return;
   }
 
   if (req.method === "POST" && req.url === "/processed") {
+    let body = null;
+
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: "JSON body が不正です" }));
+      return;
+    }
+
+    if (body && body.processedIds !== undefined && !Array.isArray(body.processedIds)) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: "processedIds は配列で指定してください" }));
+      return;
+    }
+
+    if (Array.isArray(body?.processedIds)) {
+      const processedIds = new Set(
+        body.processedIds
+          .filter((id) => typeof id === "string")
+          .map((id) => id.trim())
+          .filter(Boolean)
+      );
+      const unprocessed = await readUnprocessed();
+      const remaining = unprocessed.filter((candidate) => !processedIds.has(candidate.uniqueId));
+      const removedCount = unprocessed.length - remaining.length;
+
+      await writeUnprocessed(remaining);
+      releaseProcessingLock();
+
+      console.log(`[daemon] 未処理リストから${removedCount}件削除 (残り${remaining.length}件)`);
+      res.end(
+        JSON.stringify({
+          message: "指定された候補を未処理リストから削除しました",
+          removedCount,
+          remainingCount: remaining.length
+        })
+      );
+      return;
+    }
+
     await writeUnprocessed([]);
+    releaseProcessingLock();
     console.log("[daemon] 未処理リストをクリア");
     res.end(JSON.stringify({ message: "未処理リストをクリアしました" }));
     return;
