@@ -10,4 +10,4 @@ COPY .env.example .env.example
 
 RUN mkdir -p output/screenshots playwright/.auth
 
-CMD ["node", "src/collect-tiktok-live.js"]
+CMD ["node", "src/collect-daemon.js"]

@@ -9,6 +9,9 @@ services:
     ports:
       - "6080:6080"
       - "9222:9223"
+      - "3001:3001"
+    networks:
+      - app-net
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9223/json/version || exit 1"]
@@ -30,11 +33,15 @@ services:
       - BROWSER_MODE=cdp
       - TIKTOK_CDP_URL=http://localhost:9222
       - OUTPUT_DIR=/app/output
+      - COLLECT_INTERVAL_MS=1800000
+      - DAEMON_PORT=3000
+      - AUTO_START_LOOP=true
     volumes:
       - ./src:/app/src:ro
       - ./output:/app/output
       - ./playwright/.auth:/app/playwright/.auth
-    command: node src/collect-tiktok-live.js
+    command: node src/collect-daemon.js
+    restart: unless-stopped
 
   n8n:
     image: n8nio/n8n:latest
@@ -42,6 +49,8 @@ services:
       - .env.local
     ports:
       - "5678:5678"
+    networks:
+      - app-net
     environment:
       - N8N_RESTRICT_ENVIRONMENT_VARIABLES_ACCESS=false
       - N8N_BASIC_AUTH_ACTIVE=true
@@ -51,6 +60,10 @@ services:
       - n8n_data:/home/node/.n8n
       - ./output:/home/node/.n8n-files/output:ro
     restart: unless-stopped
+
+networks:
+  app-net:
+    driver: bridge
 
 volumes:
   chrome_profile:
