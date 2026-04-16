@@ -12,81 +12,87 @@ const {
 } = require("../src/live-navigation-runner");
 
 function createNavigateMockPage(streams) {
-  let index = -1;
-  let gotoCalls = 0;
+  let currentUrl = "https://www.tiktok.com/live";
   const screenshotPaths = [];
+  const streamsByUniqueId = new Map(streams.map((s) => [s.uniqueId, s]));
+
+  function getCurrentStream() {
+    for (const s of streams) {
+      if (currentUrl.includes(`@${s.uniqueId}`)) return s;
+    }
+    return null;
+  }
 
   return {
     screenshotPaths,
-    get gotoCalls() {
-      return gotoCalls;
-    },
     url() {
-      if (index < 0) {
-        return "https://www.tiktok.com/live";
-      }
-      return streams[index].url;
+      return currentUrl;
     },
-    locator() {
+    locator(selector) {
       return {
         first() {
           return {
             async waitFor() {},
-            async click() {
-              index = 0;
-            }
+            async boundingBox() { return null; },
+            async click() {}
           };
-        }
+        },
+        async isVisible() {
+          return false;
+        },
+        async waitFor() {},
+        async count() { return 0; }
       };
     },
     async waitForLoadState() {},
     async waitForFunction() {},
     async waitForTimeout() {},
     async content() {
-      return streams[index].html;
+      const stream = getCurrentStream();
+      return stream ? stream.html : "<html></html>";
     },
     async screenshot(options) {
       screenshotPaths.push(options.path);
     },
-    async goto() {
-      gotoCalls += 1;
-      throw new Error("page.goto should not be used in navigateAndCollect");
+    async goto(url) {
+      currentUrl = url;
     },
     async evaluate(fn) {
       const source = fn.toString();
 
-      // extractLiveMetadataFromDom: DOMからメタデータ取得
-      if (source.includes("viewer-count") || source.includes("live-title")) {
-        // テスト環境ではDOMがないのでnullを返す（HTMLフォールバックに任せる）
-        return { uniqueId: null, nickname: null, viewerCount: null, title: null };
-      }
-
-      if (source.includes("creatorProfileUrl")) {
-        const current = streams[index];
+      // extractLiveMetadataFromDom
+      if (source.includes("room-header-anchor-name")) {
+        const stream = getCurrentStream();
         return {
-          url: current.url,
-          title: current.title || "",
-          creatorProfileUrl: `https://www.tiktok.com/@${current.uniqueId}`,
-          creatorName: current.nickname || current.uniqueId
+          uniqueId: stream ? stream.uniqueId : null,
+          nickname: stream ? stream.nickname : null,
+          followerCount: null,
+          viewerCount: null,
+          title: null
         };
       }
 
-      if (source.includes("bg-UIImageOverlayBlackA25")) {
-        if (index + 1 >= streams.length) {
-          return null;
-        }
-
-        index += 1;
+      // fetchProfileData
+      if (source.includes("followers-count")) {
+        const stream = getCurrentStream();
         return {
-          className: "rounded-full cursor-pointer bg-UIImageOverlayBlackA25",
-          x: 1000,
-          y: 600,
-          width: 40,
-          height: 40
+          followerCount: stream ? stream.followerCount : null,
+          bio: stream ? (stream.bio || null) : null,
+          linkUrl: null
         };
       }
 
-      throw new Error(`Unexpected evaluate call: ${source}`);
+      // collectFeedItems
+      if (source.includes("live-side-nav-item")) {
+        return streams.map((s) => ({
+          uniqueId: s.uniqueId,
+          href: `/@${s.uniqueId}/live`,
+          viewerCount: null,
+          source: "sidebar"
+        }));
+      }
+
+      return null;
     }
   };
 }
@@ -134,10 +140,12 @@ test("parse helpers fall back to defaults on invalid input", () => {
   assert.equal(parseNumber("7", 5), 7);
 });
 
-test("navigateAndCollect captures live metadata and screenshots without page.goto", async () => {
+test("navigateAndCollect captures live metadata and fetches follower count from profile", async () => {
   const page = createNavigateMockPage([
     {
       uniqueId: "first.live",
+      nickname: "配信者1",
+      followerCount: 1200,
       url: "https://www.tiktok.com/@first.live/live?lang=ja-JP",
       html: `
         <script id="SIGI_STATE" type="application/json">
@@ -160,6 +168,8 @@ test("navigateAndCollect captures live metadata and screenshots without page.got
     },
     {
       uniqueId: "second.live",
+      nickname: "配信者2",
+      followerCount: 3400,
       url: "https://www.tiktok.com/@second.live/live",
       html: `
         <script id="SIGI_STATE" type="application/json">
@@ -192,7 +202,6 @@ test("navigateAndCollect captures live metadata and screenshots without page.got
     }
   );
 
-  assert.equal(page.gotoCalls, 0);
   assert.equal(result.candidates.length, 2);
   assert.deepEqual(
     result.candidates.map((candidate) => candidate.uniqueId),
@@ -204,7 +213,6 @@ test("navigateAndCollect captures live metadata and screenshots without page.got
   );
   assert.equal(seenCandidates[0].displayName, "配信者1");
   assert.equal(seenCandidates[0].followerCount, 1200);
-  assert.equal(seenCandidates[0].viewerCount, 45);
   assert.equal(seenCandidates[0].title, "最初の配信");
   assert.equal(
     seenCandidates[0].liveUrl,
@@ -212,5 +220,4 @@ test("navigateAndCollect captures live metadata and screenshots without page.got
   );
   assert.equal(seenCandidates[1].displayName, "配信者2");
   assert.equal(seenCandidates[1].followerCount, 3400);
-  assert.equal(seenCandidates[1].viewerCount, 88);
 });

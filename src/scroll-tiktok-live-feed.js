@@ -268,6 +268,7 @@ function buildLiveCandidate({
     viewerCount: meta.viewerCount ?? fallbackViewerCount ?? null,
     title: meta.title ?? null,
     roomId: meta.roomId ?? null,
+    bio: meta.bio ?? null,
     screenshotPath,
     collectedAt: new Date().toISOString()
   };
@@ -299,19 +300,8 @@ async function extractLiveMetadataFromDom(page) {
       nickname = (nameEl.textContent || "").trim() || null;
     }
 
-    // フォロワー数: data-e2e="room-header-like-count" (名前はlikeだが中身はフォロワー数)
-    let followerCount = null;
-    const followerEl = document.querySelector('[data-e2e="room-header-like-count"]');
-    if (followerEl) {
-      const raw = (followerEl.textContent || "").trim();
-      const multipliers = { K: 1000, M: 1000000, B: 1000000000 };
-      const m = raw.match(/([\d.]+)\s*([KMBkmb])?/);
-      if (m) {
-        const num = Number.parseFloat(m[1]);
-        const mult = multipliers[(m[2] || "").toUpperCase()] || 1;
-        followerCount = Math.round(num * mult);
-      }
-    }
+    // NOTE: data-e2e="room-header-like-count" はTikTokのUI変更で廃止済み
+    // フォロワー数はプロフィールページから取得する（fetchProfileFollowerCount）
 
     // 視聴者数: data-e2e="live-chat-container" 内の "Viewers · N"
     let viewerCount = null;
@@ -322,8 +312,45 @@ async function extractLiveMetadataFromDom(page) {
       if (vm) viewerCount = Number.parseInt(vm[1].replace(/,/g, ""), 10);
     }
 
-    return { uniqueId, nickname, followerCount, viewerCount, title: null };
+    return { uniqueId, nickname, followerCount: null, viewerCount, title: null };
   });
+}
+
+/**
+ * プロフィールページからフォロワー数・bio・リンクを取得する
+ * LIVEページのDOMからはフォロワー数が取れなくなったため、プロフィールに遷移して取得
+ */
+async function fetchProfileData(page, uniqueId) {
+  const profileUrl = `https://www.tiktok.com/@${uniqueId}`;
+  try {
+    await page.goto(profileUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+    await page.locator('[data-e2e="followers-count"]')
+      .waitFor({ state: "visible", timeout: 8000 })
+      .catch(() => {});
+
+    return page.evaluate(() => {
+      const multipliers = { K: 1000, M: 1000000, B: 1000000000 };
+      function parseCount(el) {
+        if (!el) return null;
+        const raw = (el.textContent || "").trim();
+        const m = raw.match(/([\d.]+)\s*([KMBkmb])?/);
+        if (!m) return null;
+        const num = Number.parseFloat(m[1]);
+        const mult = multipliers[(m[2] || "").toUpperCase()] || 1;
+        return Math.round(num * mult);
+      }
+      const bioEl = document.querySelector('[data-e2e="user-bio"]');
+      const linkEl = document.querySelector('[data-e2e="user-link"]');
+      return {
+        followerCount: parseCount(document.querySelector('[data-e2e="followers-count"]')),
+        bio: bioEl ? (bioEl.textContent || "").trim() || null : null,
+        linkUrl: linkEl ? (linkEl.textContent || "").trim() || null : null
+      };
+    });
+  } catch (err) {
+    console.log(`[profile] プロフィール取得失敗: ${uniqueId} - ${err.message}`);
+    return { followerCount: null, bio: null, linkUrl: null };
+  }
 }
 
 async function extractLiveMetadata(page, liveUrl) {
@@ -338,11 +365,11 @@ async function extractLiveMetadata(page, liveUrl) {
       htmlMeta = extractMetadataFromHtml(html, liveUrl);
     } catch { /* フォールバック */ }
 
-    // DOMの値を優先、HTMLの値で補完
     return {
       uniqueId: domMeta.uniqueId || htmlMeta.uniqueId,
       nickname: domMeta.nickname || htmlMeta.nickname,
-      followerCount: domMeta.followerCount ?? htmlMeta.followerCount ?? null,
+      // followerCountはプロフィールページから別途取得するため、ここではSIGI_STATEのみ
+      followerCount: htmlMeta.followerCount ?? null,
       viewerCount: domMeta.viewerCount ?? htmlMeta.viewerCount ?? null,
       title: domMeta.title || htmlMeta.title,
       roomId: htmlMeta.roomId ?? null,
@@ -377,6 +404,13 @@ async function captureLiveCandidate(page, {
 
   const meta = await extractLiveMetadata(page, liveUrl);
 
+  // プロフィールページからフォロワー数・bio・リンクを取得
+  const profileData = await fetchProfileData(page, uniqueId);
+  if (profileData.followerCount != null) {
+    meta.followerCount = profileData.followerCount;
+  }
+  meta.bio = profileData.bio;
+
   return buildLiveCandidate({
     uniqueId,
     liveUrl,
@@ -401,7 +435,7 @@ async function screenshotLiveCards(page, screenshotDir, seenUrls, onCandidate) {
     // LIVE配信ページに遷移してメタデータ抽出
     try {
       await page.goto(liveUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
-      await page.locator('[data-e2e="room-header-like-count"]')
+      await page.locator('[data-e2e="room-header-anchor-name"]')
         .waitFor({ state: "visible", timeout: 8000 })
         .catch(() => {});
       await page.waitForTimeout(5000);
@@ -498,7 +532,7 @@ async function scrollCollectAndScreenshot(page, options, screenshotDir, onCandid
 
     try {
       await page.goto(candidate.liveUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
-      await page.locator('[data-e2e="room-header-like-count"]')
+      await page.locator('[data-e2e="room-header-anchor-name"]')
         .waitFor({ state: "visible", timeout: 8000 })
         .catch(() => {});
       await page.waitForTimeout(5000);
@@ -604,7 +638,7 @@ async function navigateAndCollect(page, options, screenshotDir, onCandidate) {
     try {
       await page.goto(liveUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
       // フォロワー数要素の描画を待つ
-      await page.locator('[data-e2e="room-header-like-count"]')
+      await page.locator('[data-e2e="room-header-anchor-name"]')
         .waitFor({ state: "visible", timeout: 8000 })
         .catch(() => {});
       await page.waitForTimeout(1500);

@@ -10,6 +10,10 @@ const PROCESSING_LOCK_TTL_MS = Number.parseInt(
   10
 );
 const OUTPUT_DIR = path.resolve(process.env.OUTPUT_DIR || "output");
+const COLLECT_TIMEOUT_MS = Number.parseInt(
+  process.env.COLLECT_TIMEOUT_MS || "300000",
+  10
+);
 const UNPROCESSED_PATH = path.join(OUTPUT_DIR, "unprocessed.json");
 
 let isRunning = false;
@@ -20,6 +24,43 @@ let lastRun = null;
 let processingStartedAt = null;
 const history = [];
 const MAX_HISTORY = 20;
+
+// 連続0件検知 → ブラウザリカバリ
+const MAX_ZERO_STREAK = Number.parseInt(process.env.MAX_ZERO_STREAK || "3", 10);
+let zeroStreak = 0;
+
+// 時間帯スケジューリング（JST）
+const ACTIVE_HOURS_START = Number.parseInt(process.env.ACTIVE_HOURS_START || "18", 10);
+const ACTIVE_HOURS_END = Number.parseInt(process.env.ACTIVE_HOURS_END || "3", 10);
+
+function isActiveHour() {
+  const now = new Date();
+  // JSTに変換（UTC+9）
+  const jstHour = (now.getUTCHours() + 9) % 24;
+
+  if (ACTIVE_HOURS_START <= ACTIVE_HOURS_END) {
+    // 例: 9〜17 のような日中帯
+    return jstHour >= ACTIVE_HOURS_START && jstHour < ACTIVE_HOURS_END;
+  }
+  // 例: 18〜3 のような日跨ぎ帯
+  return jstHour >= ACTIVE_HOURS_START || jstHour < ACTIVE_HOURS_END;
+}
+
+async function reloadBrowserPage() {
+  const { chromium } = require("playwright");
+  const cdpUrl = process.env.TIKTOK_CDP_URL || "http://localhost:9222";
+  const browser = await chromium.connectOverCDP(cdpUrl);
+  const context = browser.contexts()[0];
+  if (!context) throw new Error("ブラウザコンテキストが見つかりません");
+  const page = context.pages().find((p) => /tiktok\.com/.test(p.url()));
+  if (!page) throw new Error("TikTokページが見つかりません");
+  await page.goto("https://www.tiktok.com/live", {
+    waitUntil: "domcontentloaded",
+    timeout: 30000
+  });
+  await page.waitForTimeout(3000);
+  browser.close();
+}
 
 async function readUnprocessed() {
   try {
@@ -126,6 +167,13 @@ async function accumulateResults() {
 }
 
 async function runCollect() {
+  if (!isActiveHour()) {
+    const now = new Date();
+    const jstHour = (now.getUTCHours() + 9) % 24;
+    console.log(`[daemon] 非アクティブ時間帯のためスキップ (JST ${jstHour}時, アクティブ: ${ACTIVE_HOURS_START}〜${ACTIVE_HOURS_END}時)`);
+    return { skipped: true, reason: "inactive_hours" };
+  }
+
   if (isRunning) {
     console.log("[daemon] 収集中のためスキップ");
     return { skipped: true };
@@ -136,8 +184,38 @@ async function runCollect() {
   console.log(`[daemon] 収集開始: ${startedAt}`);
 
   try {
-    await main();
+    await Promise.race([
+      main(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`収集タイムアウト (${COLLECT_TIMEOUT_MS / 1000}秒)`)), COLLECT_TIMEOUT_MS)
+      )
+    ]);
     const unprocessedCount = await accumulateResults();
+
+    // 0件連続検知 → ブラウザページリロードでリカバリ
+    const latestPath = path.join(OUTPUT_DIR, "latest-run.json");
+    let collectedCount = 0;
+    try {
+      const run = JSON.parse(await fs.readFile(latestPath, "utf8"));
+      collectedCount = (run.results || []).length;
+    } catch {}
+
+    if (collectedCount === 0) {
+      zeroStreak++;
+      console.log(`[daemon] 0件検知 (${zeroStreak}/${MAX_ZERO_STREAK}回連続)`);
+      if (zeroStreak >= MAX_ZERO_STREAK) {
+        console.log("[daemon] 連続0件上限到達 → ブラウザページをリロードしてリカバリ");
+        try {
+          await reloadBrowserPage();
+          zeroStreak = 0;
+          console.log("[daemon] リカバリ完了");
+        } catch (reloadErr) {
+          console.error(`[daemon] リカバリ失敗: ${reloadErr.message}`);
+        }
+      }
+    } else {
+      zeroStreak = 0;
+    }
 
     const finishedAt = new Date().toISOString();
     lastRun = { startedAt, finishedAt, status: "success", error: null, unprocessedCount };
@@ -307,10 +385,10 @@ server.listen(PORT, () => {
   console.log(`[daemon] HTTP API起動 port=${PORT}`);
   console.log("[daemon] エンドポイント: GET /status, GET /unprocessed, POST /processed, POST /trigger, POST /trigger-sync, POST /start, POST /stop, GET /history");
 
+  // ループを先に開始（初回実行のハングでループが止まらないように）
+  if (process.env.AUTO_START_LOOP !== "false") {
+    startLoop();
+  }
   // 初回実行
-  runCollect().then(() => {
-    if (process.env.AUTO_START_LOOP !== "false") {
-      startLoop();
-    }
-  });
+  runCollect();
 });

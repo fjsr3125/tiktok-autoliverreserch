@@ -1,0 +1,345 @@
+{
+  "name": "TikTok LIVE Scout Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://browser:3001/status",
+        "options": {}
+      },
+      "id": "check-status",
+      "name": "Check Daemon Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond_100",
+              "leftValue": "={{ $json.unprocessedCount }}",
+              "rightValue": "100",
+              "operator": { "type": "number", "operation": "gte" }
+            },
+            {
+              "id": "cond_not_processing",
+              "leftValue": "={{ $json.isProcessing }}",
+              "rightValue": "false",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-threshold",
+      "name": "100件以上 & 未処理中?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {},
+      "id": "skip-noop",
+      "name": "スキップ",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [660, 128]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://browser:3001/unprocessed",
+        "options": {}
+      },
+      "id": "get-unprocessed",
+      "name": "Get Unprocessed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, -64]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "candidates",
+        "options": {}
+      },
+      "id": "splitout",
+      "name": "Split Candidates",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [880, -64]
+    },
+    {
+      "parameters": {
+        "fileSelector": "={{ '/home/node/.n8n-files/output/screenshots/' + $json.uniqueId + '.png' }}",
+        "options": {}
+      },
+      "id": "read-screenshot",
+      "name": "Read Screenshot",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [1100, -64],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst results = [];\n\nconst apiKey = $env.GEMINI_API_KEY || '';\nif (!apiKey) throw new Error('GEMINI_API_KEY が設定されていません');\n\nconst prompt = 'この画像はTikTok LIVE配信のスクリーンショットです。以下を判定してJSONのみで回答してください。\\n1. 実在の人物が映っているか（アバター・イラスト・Vtuber・動物・風景・文字だけの場合はfalse）\\n2. 性別（male/female/unknown）\\n3. 日本人の可能性（high/medium/low）\\nJSON: {\"isPerson\": true, \"gender\": \"female\", \"isJapanese\": \"high\"}';\n\nfor (let i = 0; i < items.length; i++) {\n  const candidate = items[i].json;\n  try {\n    if (!items[i].binary || !items[i].binary.data) {\n      results.push({ json: { ...candidate, isPerson: false, gender: 'unknown', isJapanese: 'low', genderError: 'screenshot_missing' } });\n      continue;\n    }\n    const buffer = await this.helpers.getBinaryDataBuffer(i, 'data');\n    const base64Image = buffer.toString('base64');\n\n    let mimeType = 'image/png';\n    if (base64Image.startsWith('UklGR')) mimeType = 'image/webp';\n    else if (base64Image.startsWith('/9j/')) mimeType = 'image/jpeg';\n\n    const response = await this.helpers.httpRequest({\n      method: 'POST',\n      url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,\n      headers: { 'Content-Type': 'application/json' },\n      body: {\n        contents: [{ parts: [\n          { text: prompt },\n          { inline_data: { mime_type: mimeType, data: base64Image } }\n        ] }],\n        generationConfig: { responseMimeType: 'application/json' }\n      },\n      json: true,\n      timeout: 30000\n    });\n\n    let isPerson = false;\n    let gender = 'unknown';\n    let isJapanese = 'low';\n    try {\n      const text = response.candidates[0].content.parts[0].text;\n      const cleaned = text.replace(/```json\\n?|```\\n?/g, '').trim();\n      const jsonMatch = cleaned.match(/\\{[^}]+\\}/);\n      if (jsonMatch) {\n        const parsed = JSON.parse(jsonMatch[0]);\n        isPerson = parsed.isPerson === true;\n        gender = parsed.gender || 'unknown';\n        isJapanese = parsed.isJapanese || 'low';\n      }\n    } catch (e) { /* parse failure */ }\n\n    results.push({ json: { ...candidate, isPerson, gender, isJapanese } });\n  } catch (err) {\n    results.push({ json: { ...candidate, isPerson: false, gender: 'unknown', isJapanese: 'low', genderError: err.message } });\n  }\n}\n\nreturn results;"
+      },
+      "id": "gemini-gender",
+      "name": "Gemini + Parse Gender",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, -64]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond_person",
+              "leftValue": "={{ $json.isPerson }}",
+              "rightValue": "true",
+              "operator": { "type": "boolean", "operation": "true" }
+            },
+            {
+              "id": "cond_female",
+              "leftValue": "={{ $json.gender }}",
+              "rightValue": "female",
+              "operator": { "type": "string", "operation": "equals" }
+            },
+            {
+              "id": "cond_japanese",
+              "leftValue": "={{ $json.isJapanese }}",
+              "rightValue": "low",
+              "operator": { "type": "string", "operation": "notEquals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "target-filter",
+      "name": "Target Filter",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1540, -64]
+    },
+    {
+      "parameters": {},
+      "id": "skip-not-target",
+      "name": "Skip (Not Target)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1760, 64]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "mode": "id", "value": "CLIENT_SPREADSHEET_ID" },
+        "sheetName": { "mode": "name", "value": "scouted" },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            { "id": "uniqueId", "displayName": "uniqueId", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "liveUrl", "displayName": "liveUrl", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "profileUrl", "displayName": "profileUrl", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "displayName", "displayName": "displayName", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "followerCount", "displayName": "followerCount", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "viewerCount", "displayName": "viewerCount", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "collectedAt", "displayName": "collectedAt", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "gender", "displayName": "gender", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "isPerson", "displayName": "isPerson", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "isJapanese", "displayName": "isJapanese", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "append-sheet",
+      "name": "Append to Scouted Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1760, -160]
+    },
+    {
+      "parameters": {
+        "jsCode": "const allCandidates = $('Split Candidates').all();\nconst processedIds = allCandidates.map(item => item.json.uniqueId).filter(Boolean);\nreturn [{ json: { processedIds, processedCount: processedIds.length } }];"
+      },
+      "id": "collect-ids",
+      "name": "Collect Processed IDs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1980, -64]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://browser:3001/processed",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ processedIds: $json.processedIds }) }}",
+        "options": {}
+      },
+      "id": "clear-unprocessed",
+      "name": "Clear Processed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2200, -64]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": { "mode": "id", "value": "CLIENT_SPREADSHEET_ID" },
+        "sheetName": { "mode": "name", "value": "scouted" },
+        "options": {}
+      },
+      "id": "count-sheet",
+      "name": "Count Scouted Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2420, -64]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all();\nconst totalFemale = rows.length;\nreturn [{ json: { totalFemale } }];"
+      },
+      "id": "count-total",
+      "name": "Count Total Female",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2640, -64]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond_300",
+              "leftValue": "={{ $json.totalFemale }}",
+              "rightValue": "300",
+              "operator": { "type": "number", "operation": "gte" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-300",
+      "name": "300件以上?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2860, -64]
+    },
+    {
+      "parameters": {
+        "sendTo": "ikuruoda@gmail.com,hyamane0420@gmail.com",
+        "subject": "=【TikTok LIVEスカウト】女性候補が{{ $json.totalFemale }}件に到達",
+        "message": "=<h2>スカウト候補 通知</h2><p>女性と判定された配信者が <strong>{{ $json.totalFemale }}件</strong> に達しました。</p><p><a href=\"https://docs.google.com/spreadsheets/d/CLIENT_SPREADSHEET_ID\">スプレッドシートを確認する</a></p>",
+        "options": {}
+      },
+      "id": "notify-gmail",
+      "name": "Notify Gmail",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [3080, -160]
+    },
+    {
+      "parameters": {},
+      "id": "not-yet-300",
+      "name": "まだ300件未満",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [3080, 64]
+    },
+    {
+      "id": "read-already-scouted",
+      "name": "Read Already Scouted",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [550, -64],
+      "parameters": {
+        "operation": "read",
+        "documentId": { "mode": "id", "value": "CLIENT_SPREADSHEET_ID" },
+        "sheetName": { "mode": "name", "value": "既スカウト済み" },
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "filter-dedup",
+      "name": "Filter & Dedup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [990, -64],
+      "parameters": {
+        "jsCode": "let scoutedIds = new Set();\ntry {\n  const scoutedItems = $('Read Already Scouted').all();\n  for (const item of scoutedItems) {\n    const id = item.json.uniqueId || item.json.tiktok_id || item.json['TikTok ID'] || item.json['ユーザーID'] || item.json['ID'] || '';\n    if (id) scoutedIds.add(String(id).trim().toLowerCase().replace(/^@/, ''));\n  }\n} catch (e) {}\n\nconst candidates = $input.all();\nconst before = candidates.length;\n\nconst filtered = candidates.filter(item => {\n  const fc = Number(item.json.followerCount) || 0;\n  if (fc < 500 || fc >= 10000) return false;\n  const uid = (item.json.uniqueId || '').trim().toLowerCase();\n  if (uid && scoutedIds.has(uid)) return false;\n  return true;\n});\n\nconsole.log(`Filter & Dedup: ${before}件 → ${filtered.length}件 (既スカウト${scoutedIds.size}件, 除外${before - filtered.length}件)`);\nreturn filtered;"
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": { "main": [[{ "node": "Check Daemon Status", "type": "main", "index": 0 }]] },
+    "Check Daemon Status": { "main": [[{ "node": "100件以上 & 未処理中?", "type": "main", "index": 0 }]] },
+    "100件以上 & 未処理中?": { "main": [[{ "node": "Read Already Scouted", "type": "main", "index": 0 }], [{ "node": "スキップ", "type": "main", "index": 0 }]] },
+    "Read Already Scouted": { "main": [[{ "node": "Get Unprocessed", "type": "main", "index": 0 }]] },
+    "Get Unprocessed": { "main": [[{ "node": "Split Candidates", "type": "main", "index": 0 }]] },
+    "Split Candidates": { "main": [[{ "node": "Filter & Dedup", "type": "main", "index": 0 }]] },
+    "Filter & Dedup": { "main": [[{ "node": "Read Screenshot", "type": "main", "index": 0 }]] },
+    "Read Screenshot": { "main": [[{ "node": "Gemini + Parse Gender", "type": "main", "index": 0 }]] },
+    "Gemini + Parse Gender": { "main": [[{ "node": "Target Filter", "type": "main", "index": 0 }]] },
+    "Target Filter": { "main": [[{ "node": "Append to Scouted Sheet", "type": "main", "index": 0 }], [{ "node": "Skip (Not Target)", "type": "main", "index": 0 }]] },
+    "Append to Scouted Sheet": { "main": [[{ "node": "Collect Processed IDs", "type": "main", "index": 0 }]] },
+    "Skip (Not Target)": { "main": [[{ "node": "Collect Processed IDs", "type": "main", "index": 0 }]] },
+    "Collect Processed IDs": { "main": [[{ "node": "Clear Processed", "type": "main", "index": 0 }]] },
+    "Clear Processed": { "main": [[{ "node": "Count Scouted Sheet", "type": "main", "index": 0 }]] },
+    "Count Scouted Sheet": { "main": [[{ "node": "Count Total Female", "type": "main", "index": 0 }]] },
+    "Count Total Female": { "main": [[{ "node": "300件以上?", "type": "main", "index": 0 }]] },
+    "300件以上?": { "main": [[{ "node": "Notify Gmail", "type": "main", "index": 0 }], [{ "node": "まだ300件未満", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Tokyo",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "callerPolicy": "workflowsFromSameOwner",
+    "binaryMode": "separate"
+  },
+  "pinData": {}
+}

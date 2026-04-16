@@ -33,9 +33,13 @@ services:
       - BROWSER_MODE=cdp
       - TIKTOK_CDP_URL=http://localhost:9222
       - OUTPUT_DIR=/app/output
-      - COLLECT_INTERVAL_MS=1800000
+      - COLLECT_INTERVAL_MS=900000
       - DAEMON_PORT=3000
       - AUTO_START_LOOP=true
+      - MAX_FOLLOWERS=10000
+      - ACTIVE_HOURS_START=18
+      - ACTIVE_HOURS_END=3
+      - COLLECT_TIMEOUT_MS=600000
     volumes:
       - ./src:/app/src:ro
       - ./output:/app/output

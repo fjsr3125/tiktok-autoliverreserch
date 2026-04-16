@@ -27,7 +27,8 @@ async function connectBrowser() {
 
   if (mode === "launch") {
     const statePath = await getStorageStatePath();
-    const launchOptions = { headless: true, args: ["--disable-blink-features=AutomationControlled"] };
+    const headless = process.env.TIKTOK_HEADLESS !== "false";
+    const launchOptions = { headless, args: ["--disable-blink-features=AutomationControlled"] };
     if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) {
       launchOptions.executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
     }
@@ -114,7 +115,21 @@ async function main() {
   }
 
   const minFollowers = Number.parseInt(process.env.MIN_FOLLOWERS || "0", 10);
+  const maxFollowers = Number.parseInt(process.env.MAX_FOLLOWERS || "0", 10);
   const results = [];
+
+  // お店/企業アカウント判定キーワード
+  const BUSINESS_KEYWORDS = [
+    "営業時間", "定休日", "公式", "official", "株式会社", "合同会社",
+    "LLC", "Inc", "店舗", "ショップ", "shop", "store", "通販",
+    "予約", "ご予約", "お問い合わせ", "採用", "求人", "代表取締役"
+  ];
+
+  function isBusiness(bio) {
+    if (!bio) return false;
+    const lower = bio.toLowerCase();
+    return BUSINESS_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()));
+  }
 
   // 1件取得するたびにJSONに保存するコールバック
   const onCandidate = async (candidate) => {
@@ -125,6 +140,16 @@ async function main() {
     // follower足切り（nullは取得失敗なので通す）
     if (minFollowers > 0 && candidate.followerCount !== null && candidate.followerCount < minFollowers) {
       candidate.skippedReason = "follower_count_below_threshold";
+    }
+
+    // follower上限（nullは取得失敗なので通す）
+    if (maxFollowers > 0 && candidate.followerCount !== null && candidate.followerCount >= maxFollowers) {
+      candidate.skippedReason = "follower_count_above_threshold";
+    }
+
+    // お店/企業アカウント除外
+    if (!candidate.skippedReason && isBusiness(candidate.bio)) {
+      candidate.skippedReason = "business_account";
     }
 
     results.push(candidate);
@@ -163,6 +188,7 @@ async function main() {
     duplicatesCount: results.filter((c) => c.duplicateFlag).length,
     skippedCount: results.filter((c) => c.skippedReason).length,
     minFollowers,
+    maxFollowers,
     results
   };
 
@@ -175,7 +201,8 @@ async function main() {
         appendedCount: summary.appendedCount,
         duplicatesCount: summary.duplicatesCount,
         skippedCount: summary.skippedCount,
-        minFollowers
+        minFollowers,
+        maxFollowers
       },
       null,
       2
