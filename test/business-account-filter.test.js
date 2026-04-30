@@ -55,3 +55,14 @@ test("isBusinessAccount still filters commercial context", () => {
     true
   );
 });
+
+test("isBusinessAccount filters agency and liver office accounts", () => {
+  assert.equal(
+    isBusinessAccount({
+      uniqueId: "eitopapa7777",
+      displayName: "らいおん丸 GRANDIA代表",
+      bio: "TikTok Agency 〔GRANDIA〕ライバー事務所代表 LUMIN Group グッズなど販売中"
+    }),
+    true
+  );
+});

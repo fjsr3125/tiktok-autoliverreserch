@@ -13,6 +13,9 @@ const BUSINESS_BIO_KEYWORDS = [
   "お問い合わせ",
   "採用",
   "求人",
+  "agency",
+  "ライバー事務所",
+  "事務所代表",
   "代表取締役",
   "メイドカフェ",
   "ガールズバー",
@@ -74,7 +77,7 @@ function isBusinessAccount(candidate) {
 
   // 汎用語は単独では誤爆しやすいので、販売・店舗文脈がある場合だけ除外する。
   const hasRiskyBioKeyword = includesKeyword(bio, RISKY_BIO_KEYWORDS);
-  const hasCommercialContext = /予約|販売|通販|来店|出勤|営業中|dm|公式|店舗|店|cast|キャスト/i.test(bio);
+  const hasCommercialContext = /予約|販売|通販|来店|出勤|営業中|dm|公式|店舗|店|cast|キャスト|事務所|agency|代表/i.test(bio);
 
   return hasRiskyBioKeyword && hasCommercialContext;
 }
