@@ -3,6 +3,7 @@ const path = require("node:path");
 const { chromium } = require("playwright");
 
 const { loadEnvFiles } = require("./load-env");
+const { isBusinessAccount } = require("./business-account-filter");
 const {
   appendCandidates,
   getExistingUniqueIds
@@ -118,22 +119,6 @@ async function main() {
   const maxFollowers = Number.parseInt(process.env.MAX_FOLLOWERS || "0", 10);
   const results = [];
 
-  // お店/企業/非ターゲット判定キーワード
-  const BUSINESS_KEYWORDS = [
-    "営業時間", "定休日", "公式", "official", "株式会社", "合同会社",
-    "LLC", "Inc", "店舗", "ショップ", "shop", "store", "通販",
-    "予約", "ご予約", "お問い合わせ", "採用", "求人", "代表取締役",
-    "メイド", "お店", "ガールズバー", "girls bar", "BAR", "STUDIO",
-    "指名", "事務所", "Pococha", "アイドル", "担当", "ラウンドガール",
-    "ゲーム配信", "コンカフェ"
-  ];
-
-  function isBusiness(bio) {
-    if (!bio) return false;
-    const lower = bio.toLowerCase();
-    return BUSINESS_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()));
-  }
-
   // 1件取得するたびにJSONに保存するコールバック
   const onCandidate = async (candidate) => {
     candidate.duplicateFlag = Boolean(
@@ -151,7 +136,7 @@ async function main() {
     }
 
     // お店/企業アカウント除外
-    if (!candidate.skippedReason && isBusiness(candidate.bio)) {
+    if (!candidate.skippedReason && isBusinessAccount(candidate)) {
       candidate.skippedReason = "business_account";
     }
 

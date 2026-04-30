@@ -38,8 +38,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY src/browser-control-server.py /opt/browser-control-server.py
 
-EXPOSE 6080 9223
+EXPOSE 6080 9223 3002
 
 HEALTHCHECK --interval=10s --timeout=5s --retries=5 --start-period=15s \
   CMD curl -sf http://localhost:9223/json/version || exit 1

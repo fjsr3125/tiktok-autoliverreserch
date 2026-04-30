@@ -269,6 +269,7 @@ function buildLiveCandidate({
     title: meta.title ?? null,
     roomId: meta.roomId ?? null,
     bio: meta.bio ?? null,
+    screenshotStatus: meta.screenshotStatus ?? null,
     screenshotPath,
     collectedAt: new Date().toISOString()
   };
@@ -380,6 +381,32 @@ async function extractLiveMetadata(page, liveUrl) {
   }
 }
 
+async function waitForLiveMedia(page, timeoutMs = 10000) {
+  try {
+    await page.waitForFunction(
+      () => {
+        const videos = Array.from(document.querySelectorAll("video"));
+        const readyVideo = videos.some((video) => {
+          const rect = video.getBoundingClientRect();
+          return video.readyState >= 2 && rect.width >= 160 && rect.height >= 120;
+        });
+
+        if (readyVideo) return true;
+
+        const canvases = Array.from(document.querySelectorAll("canvas"));
+        return canvases.some((canvas) => {
+          const rect = canvas.getBoundingClientRect();
+          return rect.width >= 160 && rect.height >= 120;
+        });
+      },
+      { timeout: timeoutMs }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function captureLiveCandidate(page, {
   uniqueId,
   liveUrl,
@@ -388,12 +415,19 @@ async function captureLiveCandidate(page, {
   fallbackViewerCount = null
 }) {
   const screenshotPath = path.join(screenshotDir, `${uniqueId}.png`);
+  const liveMediaReady = await waitForLiveMedia(
+    page,
+    Number.parseInt(process.env.LIVE_MEDIA_WAIT_MS || "10000", 10)
+  );
 
   try {
-    // LIVE配信エリアだけをトリミングしてスクショ
-    const contentEl = page.locator('[data-e2e="live-content-container"]').first();
-    const box = await contentEl.boundingBox().catch(() => null);
-    if (box) {
+    // LIVE映像要素が取れる場合はそこを優先して、黒いコンテナやプロフィールだけの誤判定を減らす。
+    const mediaEl = page.locator("video, canvas").first();
+    const mediaBox = liveMediaReady ? await mediaEl.boundingBox().catch(() => null) : null;
+    const contentEl = page.locator('[data-e2e="live-content-container"], [data-e2e="live-player-container"]').first();
+    const contentBox = await contentEl.boundingBox().catch(() => null);
+    const box = mediaBox || contentBox;
+    if (box && box.width >= 160 && box.height >= 120) {
       await page.screenshot({ path: screenshotPath, clip: box });
     } else {
       await page.screenshot({ path: screenshotPath });
@@ -410,6 +444,7 @@ async function captureLiveCandidate(page, {
     meta.followerCount = profileData.followerCount;
   }
   meta.bio = profileData.bio;
+  meta.screenshotStatus = liveMediaReady ? "live_media_ready" : "live_media_not_ready";
 
   return buildLiveCandidate({
     uniqueId,
@@ -768,5 +803,6 @@ module.exports = {
   scrollAndCollect,
   scrollCollectAndScreenshot,
   screenshotLiveCards,
+  waitForLiveMedia,
   navigateAndCollect
 };

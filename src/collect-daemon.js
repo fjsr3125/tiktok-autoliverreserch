@@ -14,6 +14,11 @@ const COLLECT_TIMEOUT_MS = Number.parseInt(
   process.env.COLLECT_TIMEOUT_MS || "300000",
   10
 );
+const BROWSER_CONTROL_URL = process.env.BROWSER_CONTROL_URL || "http://localhost:3002";
+const BROWSER_RESTART_SETTLE_MS = Number.parseInt(
+  process.env.BROWSER_RESTART_SETTLE_MS || "10000",
+  10
+);
 const UNPROCESSED_PATH = path.join(OUTPUT_DIR, "unprocessed.json");
 
 let isRunning = false;
@@ -28,6 +33,11 @@ const MAX_HISTORY = 20;
 // 連続0件検知 → ブラウザリカバリ
 const MAX_ZERO_STREAK = Number.parseInt(process.env.MAX_ZERO_STREAK || "3", 10);
 let zeroStreak = 0;
+const MAX_BROWSER_ERROR_STREAK = Number.parseInt(
+  process.env.MAX_BROWSER_ERROR_STREAK || "1",
+  10
+);
+let browserErrorStreak = 0;
 
 // 時間帯スケジューリング（JST）
 const ACTIVE_HOURS_START = Number.parseInt(process.env.ACTIVE_HOURS_START || "18", 10);
@@ -60,6 +70,65 @@ async function reloadBrowserPage() {
   });
   await page.waitForTimeout(3000);
   browser.close();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRecoverableBrowserError(error) {
+  const message = error && error.message ? error.message : String(error || "");
+  return /connectOverCDP|Timeout.*exceeded|Target closed|browser has been closed|ECONNREFUSED|ECONNRESET|socket hang up/i.test(message);
+}
+
+async function requestChromeRestart(reason) {
+  console.log(`[daemon] Chrome再起動要求: ${reason}`);
+
+  const response = await fetch(`${BROWSER_CONTROL_URL}/restart-chrome`, {
+    method: "POST"
+  });
+
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(`Chrome再起動API失敗 (${response.status}): ${body}`);
+  }
+
+  console.log(`[daemon] Chrome再起動API応答: ${body}`);
+  await sleep(BROWSER_RESTART_SETTLE_MS);
+}
+
+async function runMainWithTimeout() {
+  await Promise.race([
+    main(),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`収集タイムアウト (${COLLECT_TIMEOUT_MS / 1000}秒)`)), COLLECT_TIMEOUT_MS)
+    )
+  ]);
+}
+
+async function collectWithRecovery() {
+  try {
+    await runMainWithTimeout();
+    browserErrorStreak = 0;
+    return;
+  } catch (error) {
+    if (!isRecoverableBrowserError(error)) {
+      throw error;
+    }
+
+    browserErrorStreak++;
+    console.error(`[daemon] ブラウザ系エラー検知 (${browserErrorStreak}/${MAX_BROWSER_ERROR_STREAK}): ${error.message}`);
+
+    if (browserErrorStreak < MAX_BROWSER_ERROR_STREAK) {
+      throw error;
+    }
+
+    await requestChromeRestart(error.message);
+    browserErrorStreak = 0;
+
+    console.log("[daemon] Chrome再起動後に収集を1回リトライ");
+    await runMainWithTimeout();
+  }
 }
 
 async function readUnprocessed() {
@@ -184,12 +253,7 @@ async function runCollect() {
   console.log(`[daemon] 収集開始: ${startedAt}`);
 
   try {
-    await Promise.race([
-      main(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(`収集タイムアウト (${COLLECT_TIMEOUT_MS / 1000}秒)`)), COLLECT_TIMEOUT_MS)
-      )
-    ]);
+    await collectWithRecovery();
     const unprocessedCount = await accumulateResults();
 
     // 0件連続検知 → ブラウザページリロードでリカバリ
@@ -244,6 +308,8 @@ async function getStatus() {
     processingLockExpiresAt: processingState.processingLockExpiresAt,
     stopRequested,
     intervalMs: INTERVAL_MS,
+    browserErrorStreak,
+    maxBrowserErrorStreak: MAX_BROWSER_ERROR_STREAK,
     nextRunAt: intervalId
       ? new Date(Date.now() + INTERVAL_MS).toISOString()
       : null,
